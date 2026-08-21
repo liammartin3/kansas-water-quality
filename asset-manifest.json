@@ -1,15 +1,15 @@
 {
   "files": {
-    "main.css": "/kansas-water-quality/static/css/main.05749c11.css",
-    "main.js": "/kansas-water-quality/static/js/main.bcca7216.js",
+    "main.css": "/kansas-water-quality/static/css/main.10a4ab11.css",
+    "main.js": "/kansas-water-quality/static/js/main.f2bf74c7.js",
     "static/js/453.9a0d6dac.chunk.js": "/kansas-water-quality/static/js/453.9a0d6dac.chunk.js",
     "index.html": "/kansas-water-quality/index.html",
-    "main.05749c11.css.map": "/kansas-water-quality/static/css/main.05749c11.css.map",
-    "main.bcca7216.js.map": "/kansas-water-quality/static/js/main.bcca7216.js.map",
+    "main.10a4ab11.css.map": "/kansas-water-quality/static/css/main.10a4ab11.css.map",
+    "main.f2bf74c7.js.map": "/kansas-water-quality/static/js/main.f2bf74c7.js.map",
     "453.9a0d6dac.chunk.js.map": "/kansas-water-quality/static/js/453.9a0d6dac.chunk.js.map"
   },
   "entrypoints": [
-    "static/css/main.05749c11.css",
-    "static/js/main.bcca7216.js"
+    "static/css/main.10a4ab11.css",
+    "static/js/main.f2bf74c7.js"
   ]
 }
