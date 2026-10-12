@@ -1,29 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-
-// A reading older than this is not "current conditions" and is shown greyed out.
-const STALE_AFTER_DAYS = 7;
+import StationPopup from './StationPopup';
+import { STALE_AFTER_DAYS, BAD_QUALIFIERS, formatSampleAge } from './usgs';
 
 // How often to re-poll while the tab is open. USGS instantaneous-values data
 // lands every 15-60 minutes, so a 24h timer would effectively never fire.
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000;
-
-// USGS qualifier codes that mean the value is not a trustworthy measurement.
-// 'P' (provisional) and 'A' (approved) are normal and must not be treated as bad.
-const BAD_QUALIFIERS = ['Eqp', 'Mnt', 'Dis', 'Ice', '***'];
-
-const QUALIFIER_LABELS = {
-  Eqp: 'Equipment malfunction',
-  Mnt: 'Station maintenance',
-  Dis: 'Record discontinued',
-  Ice: 'Ice affected',
-  Ssn: 'Outside seasonal range',
-  Bkw: 'Backwater affected',
-  Fld: 'Flood affected',
-  e: 'Estimated',
-  '***': 'Temporarily unavailable'
-};
 
 // Component to handle map flying to location
 const FlyToLocation = ({ center, zoom }) => {
@@ -40,16 +23,61 @@ const FlyToLocation = ({ center, zoom }) => {
   return null;
 };
 
-// Formats an elapsed duration as a bare quantity ("22 min", "3 days", "12.2 yr").
-// Callers supply the label that says what the duration measures.
-const formatSampleAge = (ageMs) => {
-  const hours = ageMs / (60 * 60 * 1000);
-  if (hours < 1) return `${Math.max(1, Math.round(ageMs / 60000))} min`;
-  if (hours < 48) return `${Math.round(hours)} hr`;
-  const days = Math.round(hours / 24);
-  if (days < 365) return `${days} days`;
-  const years = (days / 365).toFixed(1);
-  return `${years} yr`;
+// pH classes, lowest first. Blue is deliberately absent: on the hydrography
+// basemap blue means water, so a blue marker vanishes into its own river.
+// Validated for separation and contrast against the light-gray basemap.
+const PH_CLASSES = [
+  { max: 7, color: '#e4572e', label: 'Acidic (< 7)' },
+  { max: 7.5, color: '#15803d', label: 'Neutral (7 - 7.5)' },
+  { max: Infinity, color: '#8b5cf6', label: 'Alkaline (> 7.5)' }
+];
+
+const STALE_COLOR = '#6b7280';
+
+// Stale readings are greyed out regardless of value so a long-dead sensor
+// can't masquerade as a current alert.
+const getColorByPH = (station) =>
+  station.isStale ? STALE_COLOR : PH_CLASSES.find((c) => station.ph < c.max).color;
+
+// Fresh stations are solid dots with a dark outline, which reads on both the
+// gray land and the blue rivers. Stale stations are hollow rings: a shape
+// change says "no current reading" where a gray fill on gray land would not.
+// Acidic dots are larger because they are the alert this map exists for.
+const markerStyle = (station) => {
+  if (station.isStale) {
+    return { radius: 6, fillColor: '#ffffff', fillOpacity: 0.9, color: STALE_COLOR, weight: 2 };
+  }
+  return {
+    radius: station.ph < 7 ? 10 : 8,
+    fillColor: getColorByPH(station),
+    fillOpacity: 0.95,
+    color: '#1f2937',
+    weight: 1.5
+  };
+};
+
+// The popup's content mounts only while it is open, so its week of history is
+// fetched on demand rather than for every station up front.
+const StationMarker = ({ station }) => {
+  const popupRef = useRef(null);
+  const [open, setOpen] = useState(false);
+  const relayout = useCallback(() => popupRef.current?.update(), []);
+  const color = getColorByPH(station);
+
+  return (
+    <CircleMarker
+      center={[station.lat, station.lon]}
+      {...markerStyle(station)}
+      eventHandlers={{
+        popupopen: () => setOpen(true),
+        popupclose: () => setOpen(false)
+      }}
+    >
+      <Popup ref={popupRef} className="station-popup" minWidth={340} maxWidth={340}>
+        {open && <StationPopup station={station} phColor={color} onLayout={relayout} />}
+      </Popup>
+    </CircleMarker>
+  );
 };
 
 const KansasWaterQuality = () => {
@@ -61,16 +89,6 @@ const KansasWaterQuality = () => {
   const [flyToCenter, setFlyToCenter] = useState(null);
   const [flyToZoom, setFlyToZoom] = useState(7);
   const [showStale, setShowStale] = useState(true);
-
-  // pH color scale. Stale readings are greyed out regardless of value so a
-  // long-dead sensor can't masquerade as a current alert.
-  const getColorByPH = (station) => {
-    if (station.isStale) return '#6b7280'; // Stale - Grey
-    if (station.ph < 7) return '#e74c3c'; // Acidic - Red
-    if (station.ph < 7.5) return '#2ecc71'; // Neutral - Green
-    if (station.ph < 8.5) return '#3498db'; // Slightly alkaline - Blue
-    return '#9b59b6'; // Alkaline - Purple
-  };
 
   // A timeSeries can carry several value blocks (different sensors/methods at
   // the same site). Block 0 is sometimes a discontinued sensor returning the
@@ -191,7 +209,12 @@ const KansasWaterQuality = () => {
     .sort((a, b) => a.ph - b.ph);
 
   const staleCount = stations.filter((s) => s.isStale).length;
-  const visibleStations = showStale ? stations : stations.filter((s) => !s.isStale);
+  // Leaflet stacks markers in the order they're added, so draw stale rings
+  // first and acidic dots last to keep alerts on top where stations cluster.
+  const drawOrder = (s) => (s.isStale ? 0 : s.ph < 7 ? 2 : 1);
+  const visibleStations = (showStale ? stations : stations.filter((s) => !s.isStale))
+    .slice()
+    .sort((a, b) => drawOrder(a) - drawOrder(b));
 
   const freshStations = stations.filter((s) => !s.isStale);
   const newestSample = freshStations.length
@@ -204,12 +227,12 @@ const KansasWaterQuality = () => {
   };
 
   if (loading) {
-    return <div className="flex items-center justify-center h-screen bg-gray-900 text-white">Loading water quality data...</div>;
+    return <div className="flex items-center justify-center h-screen bg-white text-gray-900">Loading water quality data...</div>;
   }
 
   if (error && stations.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-red-400 gap-4">
+      <div className="flex flex-col items-center justify-center h-screen bg-gray-50 text-red-600 gap-4">
         <p>{error}</p>
         <button
           onClick={() => fetchWaterQualityData(true)}
@@ -230,78 +253,56 @@ const KansasWaterQuality = () => {
           zoom={7}
           style={{ height: '100%', width: '100%' }}
         >
+          {/* Esri's light canvas: keyless and free, unlike CARTO which now meters
+              anonymous use. Esri serves {z}/{y}/{x} order and its deepest native
+              tile is z16, so overzoom is upscaled rather than 404ing. */}
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-            subdomains='abcd'
+            attribution='Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin | Hydrography: <a href="https://www.usgs.gov/national-hydrography">USGS NHD</a>'
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+            maxNativeZoom={16}
+            maxZoom={19}
+          />
+          {/* USGS National Hydrography: transparent rivers, streams and lakes with
+              river names, so each station visibly sits on the water it samples. */}
+          <TileLayer
+            url="https://basemap.nationalmap.gov/arcgis/rest/services/USGSHydroCached/MapServer/tile/{z}/{y}/{x}"
+            opacity={0.6}
+            maxNativeZoom={16}
+            maxZoom={19}
+          />
+          {/* Place names ship as a separate overlay on Esri's canvas basemaps. */}
+          <TileLayer
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+            maxNativeZoom={16}
             maxZoom={19}
           />
 
           <FlyToLocation center={flyToCenter} zoom={flyToZoom} />
 
           {visibleStations.map((station) => (
-            <CircleMarker
-              key={station.id}
-              center={[station.lat, station.lon]}
-              radius={station.isStale ? 6 : 8}
-              fillColor={getColorByPH(station)}
-              color={station.isStale ? '#9ca3af' : '#fff'}
-              weight={2}
-              opacity={station.isStale ? 0.5 : 1}
-              fillOpacity={station.isStale ? 0.35 : 0.8}
-            >
-              <Popup>
-                <div className="text-sm">
-                  <h3 className="font-bold mb-2">{station.name}</h3>
-                  <p><strong>Station ID:</strong> {station.id}</p>
-                  <p><strong>pH Value:</strong> {station.ph.toFixed(2)}</p>
-                  <p><strong>Measured:</strong> {station.measuredAt.toLocaleString()}</p>
-                  <p><strong>Sample Age:</strong> {formatSampleAge(station.ageMs)}</p>
-                  <p><strong>Latitude:</strong> {station.lat.toFixed(4)}</p>
-                  <p><strong>Longitude:</strong> {station.lon.toFixed(4)}</p>
-                  {station.qualifiers
-                    .filter((q) => QUALIFIER_LABELS[q])
-                    .map((q) => (
-                      <p key={q} className="text-amber-700">{QUALIFIER_LABELS[q]}</p>
-                    ))}
-                  {station.isStale && (
-                    <p className="mt-2 font-semibold text-amber-700">
-                      Stale reading &mdash; this sensor has not reported in over {STALE_AFTER_DAYS} days.
-                      Not current conditions.
-                    </p>
-                  )}
-                </div>
-              </Popup>
-            </CircleMarker>
+            <StationMarker key={station.id} station={station} />
           ))}
         </MapContainer>
 
         {/* Legend */}
-        <div className="absolute bottom-8 left-8 bg-gray-900 text-white p-4 rounded-lg shadow-lg z-[1000] border border-gray-700">
+        <div className="absolute bottom-8 left-8 bg-white text-gray-900 p-4 rounded-lg shadow-lg z-[1000] border border-gray-200">
           <h3 className="font-bold mb-2 text-sm">pH Scale</h3>
           <div className="space-y-1 text-xs">
+            {PH_CLASSES.map((c) => (
+              <div key={c.label} className="flex items-center gap-2">
+                <div
+                  className="w-4 h-4 rounded-full border-[1.5px] border-gray-800"
+                  style={{ backgroundColor: c.color }}
+                ></div>
+                <span>{c.label}</span>
+              </div>
+            ))}
             <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#e74c3c' }}></div>
-              <span>Acidic (&lt; 7)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#2ecc71' }}></div>
-              <span>Neutral (7 - 7.5)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#3498db' }}></div>
-              <span>Alkaline (7.5 - 8.5)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#9b59b6' }}></div>
-              <span>Highly Alkaline (&gt; 8.5)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#6b7280', opacity: 0.5 }}></div>
+              <div className="w-4 h-4 rounded-full border-2 bg-white" style={{ borderColor: STALE_COLOR }}></div>
               <span>Stale (&gt; {STALE_AFTER_DAYS} days old)</span>
             </div>
           </div>
-          <div className="text-xs mt-3 pt-2 border-t border-gray-700 text-gray-400 space-y-0.5">
+          <div className="text-xs mt-3 pt-2 border-t border-gray-200 text-gray-500 space-y-0.5">
             <p>Newest sample: {newestSample ? newestSample.toLocaleString() : 'none current'}</p>
             <p>Page refreshed: {fetchedAt ? fetchedAt.toLocaleString() : '—'}</p>
           </div>
@@ -309,21 +310,21 @@ const KansasWaterQuality = () => {
       </div>
 
       {/* Side Panel - Acidic Stations */}
-      <div className="w-80 bg-gray-900 text-white p-6 overflow-y-auto border-l border-gray-700">
+      <div className="w-80 bg-white text-gray-900 p-6 overflow-y-auto border-l border-gray-200">
         <h2 className="text-xl font-bold mb-4">Acidic Stations</h2>
-        <p className="text-sm text-gray-400 mb-4">
+        <p className="text-sm text-gray-500 mb-4">
           Current readings with pH &lt; 7 (sorted by acidity). Sensors that have not reported
           in {STALE_AFTER_DAYS} days are excluded.
         </p>
 
         {error && (
-          <div className="bg-red-950 border border-red-800 text-red-300 p-3 rounded-lg text-xs mb-4">
+          <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg text-xs mb-4">
             {error} Showing last known data.
           </div>
         )}
 
         {acidicStations.length === 0 ? (
-          <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 text-center text-gray-400">
+          <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-center text-gray-500">
             No acidic stations found
           </div>
         ) : (
@@ -331,18 +332,18 @@ const KansasWaterQuality = () => {
             {acidicStations.map((station, index) => (
               <div
                 key={station.id}
-                className="bg-gray-800 p-4 rounded-lg shadow border border-gray-700 cursor-pointer hover:bg-gray-700 hover:border-red-500 transition-all"
+                className="bg-gray-50 p-4 rounded-lg shadow border border-gray-200 cursor-pointer hover:bg-white hover:border-red-300 transition-all"
                 onClick={() => handleStationClick(station.lat, station.lon)}
               >
                 <div className="flex items-start gap-2">
-                  <div className="text-lg font-bold text-red-400">#{index + 1}</div>
+                  <div className="text-lg font-bold text-red-600">#{index + 1}</div>
                   <div className="flex-1">
                     <h3 className="font-semibold text-sm mb-2">{station.name}</h3>
-                    <div className="text-xs space-y-1 text-gray-300">
-                      <p><strong>pH:</strong> <span className="text-red-400 font-bold">{station.ph.toFixed(2)}</span></p>
+                    <div className="text-xs space-y-1 text-gray-600">
+                      <p><strong>pH:</strong> <span className="text-red-600 font-bold">{station.ph.toFixed(2)}</span></p>
                       <p><strong>Station ID:</strong> {station.id}</p>
                       <p><strong>Sample Age:</strong> {formatSampleAge(station.ageMs)}</p>
-                      <p className="text-gray-500 text-xs mt-1">Click to zoom to location</p>
+                      <p className="text-gray-400 text-xs mt-1">Click to zoom to location</p>
                     </div>
                   </div>
                 </div>
@@ -351,16 +352,16 @@ const KansasWaterQuality = () => {
           </div>
         )}
 
-        <div className="mt-6 p-4 bg-gray-800 rounded-lg border border-gray-700">
+        <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
           <div className="flex items-center justify-between gap-2">
             <div>
               <h3 className="font-semibold text-sm">Stale sensors</h3>
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 {staleCount} of {stations.length} stations have not reported in
                 over {STALE_AFTER_DAYS} days.
               </p>
             </div>
-            <label className="flex items-center gap-1 text-xs text-gray-300 shrink-0">
+            <label className="flex items-center gap-1 text-xs text-gray-600 shrink-0">
               <input
                 type="checkbox"
                 checked={showStale}
@@ -371,9 +372,9 @@ const KansasWaterQuality = () => {
           </div>
         </div>
 
-        <div className="mt-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
           <h3 className="font-semibold text-sm mb-2">About pH</h3>
-          <p className="text-xs text-gray-300">
+          <p className="text-xs text-gray-600">
             pH measures water acidity/alkalinity. Most aquatic life thrives between 6.5-8.5.
             Values below 7 are acidic and may indicate pollution or environmental stress.
           </p>

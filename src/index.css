@@ -1,3 +1,56 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Station popup: replaces Leaflet's speech bubble with a card that matches the
+   side panel. Selectors are scoped under .leaflet-popup-content where needed to
+   out-rank leaflet.css, which loads after this file. */
+.station-popup .leaflet-popup-content-wrapper {
+  background: #ffffff;
+  color: #111827;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 0;
+  box-shadow: 0 20px 40px -12px rgba(15, 23, 42, 0.25);
+}
+
+.station-popup .leaflet-popup-content {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.station-popup .leaflet-popup-content p {
+  margin: 0;
+}
+
+.station-popup .leaflet-popup-content a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.station-popup .leaflet-popup-content a:hover {
+  text-decoration: underline;
+}
+
+.station-popup .leaflet-popup-tip {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  box-shadow: none;
+}
+
+.station-popup a.leaflet-popup-close-button {
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 9999px;
+  color: #6b7280;
+  font: 18px/24px ui-sans-serif, system-ui, sans-serif;
+}
+
+.station-popup a.leaflet-popup-close-button:hover {
+  color: #111827;
+  background: #f3f4f6;
+}
